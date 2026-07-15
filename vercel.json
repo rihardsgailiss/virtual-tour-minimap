@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/Virtual Tour Minimap.dc.html" }
+  ]
+}
