@@ -104,6 +104,14 @@
             <svg viewBox="0 0 {{ room.w }} {{ room.h }}" style="position: absolute; left: {{ room.svgLeft }}px; top: {{ room.svgTop }}px; width: {{ room.w }}px; height: {{ room.h }}px; overflow: visible; pointer-events: none;">
               <path d="{{ room.path }}" fill="{{ room.fill }}" style="pointer-events: none;" />
               <path d="{{ room.path }}" fill="rgba(26,34,46,.10)" style="pointer-events: none; mix-blend-mode: multiply; opacity: {{ room.hoverOpacity }}; transition: opacity .18s ease;" />
+              <sc-if value="{{ room.unavail }}" hint-placeholder-val="{{ false }}">
+                <defs>
+                  <pattern id="mm-hatch" patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(45)">
+                    <line x1="0" y1="0" x2="0" y2="5" stroke="#1A222E" stroke-width="1.5" stroke-opacity="0.15" />
+                  </pattern>
+                </defs>
+                <path d="{{ room.path }}" fill="url(#mm-hatch)" style="pointer-events: none;" />
+              </sc-if>
             </svg>
           </sc-for>
           <x-import component-from-global-scope="FloorplanArt" from="./FloorplanArt.jsx" hint-size="264.784px,191.675px" style="position: absolute; left: 0; top: 0;"></x-import>
@@ -153,7 +161,16 @@
     </div>
 
     <!-- grab to pan / scroll to zoom / click to move -->
-    <div onPointerDown="{{ onMMDown }}" onPointerMove="{{ onMMMove }}" onPointerUp="{{ onMMUp }}" onPointerCancel="{{ onMMUp }}" onMouseMove="{{ onMMHover }}" onMouseLeave="{{ onMMLeave }}" onWheel="{{ onMMWheel }}" style="position: absolute; inset: 0; border-radius: 50%; cursor: pointer; z-index: 5; touch-action: none;"></div>
+    <div onPointerDown="{{ onMMDown }}" onPointerMove="{{ onMMMove }}" onPointerUp="{{ onMMUp }}" onPointerCancel="{{ onMMUp }}" onMouseMove="{{ onMMHover }}" onMouseLeave="{{ onMMLeave }}" onWheel="{{ onMMWheel }}" style="position: absolute; inset: 0; border-radius: 50%; cursor: {{ mmCursor }}; z-index: 5; touch-action: none;"></div>
+
+    <!-- unavailable-room tooltip (follows cursor) -->
+    <sc-if value="{{ tooltip }}" hint-placeholder-val="{{ false }}">
+      <div style="position: absolute; left: {{ tooltip.x }}px; top: {{ tooltip.y }}px; z-index: 8; pointer-events: none;">
+        <div style="display: flex; align-items: center; gap: 8px; opacity: .95; border-radius: 6px; background: rgb(72,83,99); padding: 4px 10px 5px 10px; white-space: nowrap;">
+          <span style="font-weight: 700; font-size: 12px; line-height: 15px; letter-spacing: 0.01em; color: #fff;">Room not available on tour</span>
+        </div>
+      </div>
+    </sc-if>
   </div>
 
   <!-- MOBILE ONBOARDING OVERLAY (Figma "Tutorial animation") — covers the minimap, tap to dismiss -->
@@ -195,6 +212,23 @@ class Component extends DCLogic {
     return 'rgb(' + m.slice(0, 3).map(n => Math.round(+n + (255 - n) * t)).join(',') + ')';
   }
 
+  // The bathroom has no panorama spots and cannot be travelled to.
+  unavailable(id) { return id === 'bath' || id === 'kitchen'; }
+
+  closeTooltip = (e) => { if (e) { e.stopPropagation(); } this.setState({ tooltipSticky: false, tooltipPos: null, overUnavail: false }); };
+
+  // Tooltip position (box-local 360-space), clamped to stay fully on screen.
+  _tooltipVals() {
+    const active = (this.state.overUnavail || this.state.tooltipSticky) && this.state.tooltipPos;
+    if (!active) return null;
+    const TW = 186, TH = 24, gap = 14, pad = 6;
+    let x = this.state.tooltipPos.x;
+    let y = this.state.tooltipPos.y + gap;
+    x = Math.max(pad, Math.min(x, 360 - TW - pad));
+    y = Math.max(pad, Math.min(y, 360 - TH - pad));
+    return { x, y, sticky: !!this.state.tooltipSticky };
+  }
+
   // Fixed snap points per room: a scattered (non-row) pattern; small rooms get 4.
   snapPoints() {
     if (this._snap) return this._snap;
@@ -206,8 +240,8 @@ class Component extends DCLogic {
     const out = {};
     for (const r of this.roomDefs()) {
       let pts;
-      if (r.id === 'bath') {
-        pts = [{ x: r.svgLeft + 0.5 * r.w, y: r.svgTop + 0.5 * r.h }];
+      if (this.unavailable(r.id)) {
+        pts = [];
       } else if (r.id === 'hall') {
         pts = [[.1, .32], [.4, .68], [.66, .3], [.9, .66]].map(([fx, fy]) => wide(fx, fy, r));
       } else if (r.id === 'kitchen') {
@@ -262,11 +296,20 @@ class Component extends DCLogic {
   // hover a room -> mode A darkens its fill; mode B highlights the 3 defined
   // snap points closest to the cursor (points themselves are fixed).
   onMMHover = (e) => {
+    if (this.state.mode === 'M') return;   // mobile: tooltip is tap-driven, not hover
     if (this._ptrs && this._ptrs.size) return;
     const r = e.currentTarget.getBoundingClientRect();
     const sc = r.width / 360;
     const f = this.screenToFloor((e.clientX - r.left) / sc, (e.clientY - r.top) / sc);
-    const room = this.roomAt(f);
+    let room = this.roomAt(f);
+    const overUnavail = !!(room && this.unavailable(room.id));
+    if (overUnavail) room = null;   // unavailable room: no hover feedback
+    if (overUnavail) {
+      const tp = { x: (e.clientX - r.left) / sc, y: (e.clientY - r.top) / sc };
+      this.setState({ overUnavail: true, tooltipPos: tp, hoveredRoom: null, hoverDots: [], cursorPt: null });
+      return;
+    }
+    if (this.state.overUnavail) this.setState({ overUnavail: false, tooltipPos: this.state.tooltipSticky ? this.state.tooltipPos : null });
     if (this.state.mode === 'B') {
       const all = room ? (this.snapPoints()[room.id] || []) : [];
       // overlay follows the hovered room; show only the single closest point to the cursor
@@ -292,7 +335,7 @@ class Component extends DCLogic {
       if (id !== this.state.hoveredRoom) this.setState({ hoveredRoom: id, cursorPt: null });
     }
   };
-  onMMLeave = () => { this._hoverRoomB = null; this._hoverKeyB = null; if (this.state.hoveredRoom || this.state.hoverDots.length || this.state.cursorPt) this.setState({ hoveredRoom: null, hoverDots: [], cursorPt: null }); };
+  onMMLeave = () => { this._hoverRoomB = null; this._hoverKeyB = null; if (this.state.overUnavail) this.setState({ overUnavail: false, tooltipPos: null }); if (this.state.hoveredRoom || this.state.hoverDots.length || this.state.cursorPt) this.setState({ hoveredRoom: null, hoverDots: [], cursorPt: null }); };
 
   // Open-floor "safe" discs per room (container coords) — points inside these
   // stay in the room interior, well clear of the walls.
@@ -434,6 +477,15 @@ class Component extends DCLogic {
     const f = this.screenToFloor(sx, sy);
     const cs = this.closestSnap(f);
     const room = cs ? cs.room : (this.roomAt(f) || this.nearestRoom(f.x, f.y));
+    if (!room || this.unavailable(room.id)) {   // unavailable: no spots, not travellable
+      if (this.state.mode === 'M' && room && this.unavailable(room.id)) {
+        this.setState({ tooltipPos: { x: sx, y: sy }, tooltipSticky: true });
+        clearTimeout(this._ttTimer);
+        this._ttTimer = setTimeout(() => this.setState({ tooltipSticky: false, tooltipPos: null }), 5000);
+      }
+      return;
+    }
+    if (this.state.tooltipSticky) this.setState({ tooltipSticky: false, tooltipPos: null });
     const pts = room ? (this.snapPoints()[room.id] || []) : [];
     const dest = (cs && cs.point) || f;
     this._hoverRoomB = null;
@@ -550,6 +602,7 @@ class Component extends DCLogic {
       w: r.w, h: r.h, svgLeft: r.svgLeft, svgTop: r.svgTop, path: r.path,
       fill: this.state.mode === 'B' ? '#E5E6E8' : r.base,
       hoverOpacity: this.state.hoveredRoom === r.id ? 1 : 0,
+      unavail: this.unavailable(r.id),
     }));
 
     const current = cur ? { x: cur.x, y: cur.y, name: cur.name, area: cur.area } : null;
@@ -593,7 +646,9 @@ class Component extends DCLogic {
       aBg: A ? '#fff' : 'transparent', aColor: A ? '#1a222e' : '#fff',
       bBg: B ? '#fff' : 'transparent', bColor: B ? '#1a222e' : '#fff',
       mBg: M ? '#fff' : 'transparent', mColor: M ? '#1a222e' : '#fff',
-      onPanoDown: this.onPanoDown, onPanoMove: this.onPanoMove, onPanoUp: this.onPanoUp };
+      onPanoDown: this.onPanoDown, onPanoMove: this.onPanoMove, onPanoUp: this.onPanoUp,
+      mmCursor: this.state.overUnavail ? 'default' : 'pointer',
+      tooltip: this._tooltipVals(), closeTooltip: this.closeTooltip };
   }
 }
 </script>
